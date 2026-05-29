@@ -23,9 +23,9 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"golang.org/x/crypto/bcrypt"
 
-	"consumable-tracker/server/database"
-	"consumable-tracker/server/handlers"
-	"consumable-tracker/server/middleware"
+	"consumable-tracker/database"
+	"consumable-tracker/handlers"
+	"consumable-tracker/middleware"
 )
 
 //go:embed web-dist/*

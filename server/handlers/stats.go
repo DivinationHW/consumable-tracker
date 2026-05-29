@@ -4,7 +4,7 @@ import (
 	"database/sql"
 
 	"github.com/gofiber/fiber/v2"
-	"consumable-tracker/server/models"
+	"consumable-tracker/models"
 )
 
 type StatsHandler struct {

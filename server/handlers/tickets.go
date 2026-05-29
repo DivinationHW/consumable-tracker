@@ -6,7 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"consumable-tracker/server/models"
+	"consumable-tracker/models"
 )
 
 type TicketHandler struct {

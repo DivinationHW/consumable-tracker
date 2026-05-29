@@ -13,7 +13,7 @@ COPY server/go.* ./
 RUN go mod download
 COPY server/ .
 COPY --from=vue-builder /web/dist ./web-dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o server .
+    RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o server .
 
 # Stage 3: Runtime
 FROM alpine:3.20

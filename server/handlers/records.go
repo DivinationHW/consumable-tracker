@@ -7,7 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/xuri/excelize/v2"
-	"consumable-tracker/server/models"
+	"consumable-tracker/models"
 )
 
 type RecordHandler struct {
