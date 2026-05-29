@@ -1,22 +1,5 @@
 services:
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: consumable_db
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
-      - ./backups:/backups
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d consumable_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  api:
+  app:
     build:
       context: .
       dockerfile: server/Dockerfile
@@ -24,7 +7,8 @@ services:
     ports:
       - "${PORT:-8443}:${PORT:-8443}"
     environment:
-      DATABASE_URL: postgresql://admin:${DB_PASSWORD}@db:5432/consumable_db?sslmode=disable
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      DATABASE_URL: postgresql://admin:${DB_PASSWORD}@localhost:5432/consumable_db?sslmode=disable
       JWT_SECRET: ${JWT_SECRET}
       HTTPS_MODE: ${HTTPS_MODE:-selfsigned}
       DOMAIN: ${DOMAIN:-localhost}
@@ -32,12 +16,12 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
     volumes:
+      - pgdata:/var/lib/postgresql/data
       - ./certs:/certs:ro
       - ./backups:/backups
-    depends_on:
-      db:
-        condition: service_healthy
-    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     security_opt:
       - no-new-privileges:true
 

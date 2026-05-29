@@ -16,7 +16,7 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		DatabaseURL:   getEnv("DATABASE_URL", "postgresql://admin:password@db:5432/consumable_db?sslmode=disable"),
+		DatabaseURL:   getEnv("DATABASE_URL", "postgresql://admin:password@localhost:5432/consumable_db?sslmode=disable"),
 		JWTSecret:     getEnv("JWT_SECRET", "change_me_to_a_random_secret_key_32_chars"),
 		HTTPSMode:     getEnv("HTTPS_MODE", "selfsigned"),
 		Domain:        getEnv("DOMAIN", "localhost"),

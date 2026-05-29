@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -f .env ]; then
@@ -37,21 +37,21 @@ case "$MODE" in
         ;;
 
     docker)
-        echo "=== Docker部署 ==="
+        echo "=== Docker部署（单容器集成数据库）==="
         docker compose build
         docker compose up -d
         echo "Docker部署完成"
         ;;
 
     init-db)
-        echo "=== 初始化数据库 ==="
-        docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" < database/init.sql
-        echo "数据库初始化完成"
+        echo "=== 初始化数据库（首次启动自动执行，一般无需手动）==="
+        docker compose exec app psql -U admin -d consumable_db < database/init.sql 2>/dev/null || true
+        echo "完成"
         ;;
 
     backup)
         echo "=== 手动备份 ==="
-        docker compose exec -T db pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "backups/backup_$(date +%Y%m%d_%H%M%S).sql.gz"
+        docker compose exec app pg_dump -U admin consumable_db | gzip > "backups/backup_$(date +%Y%m%d_%H%M%S).sql.gz"
         echo "备份完成"
         ;;
 
@@ -61,12 +61,12 @@ case "$MODE" in
             echo "用法: $0 restore <备份文件名>"
             exit 1
         fi
-        gunzip -c "$BACKUP_FILE" | docker compose exec -T db psql -U "$DB_USER" "$DB_NAME"
+        gunzip -c "$BACKUP_FILE" | docker compose exec -T app psql -U admin consumable_db
         echo "恢复完成"
         ;;
 
     logs)
-        docker compose logs -f api
+        docker compose logs -f app
         ;;
 
     cert)
