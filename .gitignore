@@ -1,0 +1,13 @@
+.env
+certs/
+backups/
+node_modules/
+web/dist/
+android/.gradle/
+android/build/
+android/app/build/
+*.apk
+*.aab
+*.log
+.DS_Store
+Thumbs.db
