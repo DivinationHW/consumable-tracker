@@ -1,13 +1,12 @@
-package handlers
+﻿package handlers
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"fmt"
+	"os"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"consumable-tracker/middleware"
-	"consumable-tracker/models"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -15,87 +14,94 @@ type AuthHandler struct {
 	DB *sql.DB
 }
 
-func NewAuthHandler(db *sql.DB) *AuthHandler {
-	return &AuthHandler{DB: db}
+type loginReq struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type loginResp struct {
+	Token    string `json:"token"`
+	UserID   int    `json:"user_id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
 }
 
 func (h *AuthHandler) Login(c *fiber.Ctx) error {
-	var req models.LoginRequest
+	var req loginReq
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
+		return c.Status(400).JSON(fiber.Map{"error": "请求格式错误"})
 	}
-
 	if req.Username == "" || req.Password == "" {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "username and password are required"})
+		return c.Status(400).JSON(fiber.Map{"error": "请输入用户名和密�?})
 	}
-
-	var user models.User
-	err := h.DB.QueryRow(
-		"SELECT id, username, password_hash, role FROM users WHERE username = $1",
-		req.Username,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role)
-
+	var userID int
+	var hash, role string
+	err := h.DB.QueryRow("SELECT id, password_hash, role FROM users WHERE username = ?", req.Username).Scan(&userID, &hash, &role)
 	if err == sql.ErrNoRows {
-		return c.Status(401).JSON(models.ErrorResponse{Error: "invalid username or password"})
+		return c.Status(401).JSON(fiber.Map{"error": "用户名或密码错误"})
 	}
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "internal server error"})
+		return c.Status(500).JSON(fiber.Map{"error": "服务器错�?})
 	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		hashed := sha256.Sum256([]byte(req.Password))
-		if fmt.Sprintf("%x", hashed) != user.PasswordHash {
-			return c.Status(401).JSON(models.ErrorResponse{Error: "invalid username or password"})
-		}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		return c.Status(401).JSON(fiber.Map{"error": "用户名或密码错误"})
 	}
-
-	token, err := middleware.GenerateToken(user.ID, user.Role)
+	secret := os.Getenv("JWT_SECRET")
+	claims := jwt.MapClaims{
+		"sub":  userID,
+		"role": role,
+		"exp":  time.Now().Add(720 * time.Hour).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte(secret))
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to generate token"})
+		return c.Status(500).JSON(fiber.Map{"error": "生成Token失败"})
 	}
-
-	return c.JSON(models.TokenResponse{
-		Token:    token,
-		UserID:   user.ID,
-		Username: user.Username,
-		Role:     user.Role,
+	return c.JSON(loginResp{
+		Token:    tokenStr,
+		UserID:   userID,
+		Username: req.Username,
+		Role:     role,
 	})
 }
 
+type changePWReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
 func (h *AuthHandler) ChangePassword(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(int)
-
-	var req models.ChangePasswordRequest
+	var req changePWReq
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
+		return c.Status(400).JSON(fiber.Map{"error": "请求格式错误"})
 	}
-
-	if req.OldPassword == "" || req.NewPassword == "" {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "old and new passwords are required"})
+	if req.NewPassword == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "新密码不能为�?})
 	}
-	if len(req.NewPassword) < 8 {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "password must be at least 8 characters"})
+	userID := c.Locals("user_id").(int)
+	var hash string
+	if err := h.DB.QueryRow("SELECT password_hash FROM users WHERE id = ?", userID).Scan(&hash); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "服务器错�?})
 	}
-
-	var passwordHash string
-	err := h.DB.QueryRow("SELECT password_hash FROM users WHERE id = $1", userID).Scan(&passwordHash)
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.OldPassword)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "原密码错�?})
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), 12)
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "internal server error"})
+		return c.Status(500).JSON(fiber.Map{"error": "加密失败"})
 	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.OldPassword)); err != nil {
-		return c.Status(401).JSON(models.ErrorResponse{Error: "invalid old password"})
+	if _, err := h.DB.Exec("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?", string(newHash), userID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "修改失败"})
 	}
+	return c.JSON(fiber.Map{"message": "修改成功"})
+}
 
-	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+func (h *AuthHandler) Me(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(int)
+	var username, role string
+	err := h.DB.QueryRow("SELECT username, role FROM users WHERE id = ?", userID).Scan(&username, &role)
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to hash password"})
+		return c.Status(500).JSON(fiber.Map{"error": "服务器错�?})
 	}
-
-	_, err = h.DB.Exec("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", string(newHash), userID)
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to update password"})
-	}
-
-	return c.JSON(fiber.Map{"message": "password updated successfully"})
+	return c.JSON(fiber.Map{"user_id": userID, "username": username, "role": role})
 }

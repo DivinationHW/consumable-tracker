@@ -1,0 +1,5 @@
+@media print {
+  .el-header, .el-aside, .el-menu { display: none !important; }
+  .el-main { margin: 0 !important; padding: 0 !important; }
+  body { background: white; }
+}

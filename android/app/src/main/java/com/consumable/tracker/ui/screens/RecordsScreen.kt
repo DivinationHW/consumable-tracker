@@ -7,54 +7,38 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.consumable.tracker.data.models.UsageRecord
-import com.consumable.tracker.data.repository.TrackerRepository
-import com.consumable.tracker.ui.theme.*
-import java.text.SimpleDateFormat
-import java.util.*
+import androidx.navigation.NavHostController
+import com.consumable.tracker.data.api.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecordsScreen() {
-    val repo = remember { TrackerRepository() }
-    var records by remember { mutableStateOf<List<UsageRecord>>(emptyList()) }
+fun RecordsScreen(navController: NavHostController) {
+    var records by remember { mutableStateOf<List<RecordResponse>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         try {
-            val cal = Calendar.getInstance()
-            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
-            records = repo.getRecords(mapOf(
-                "start_date" to fmt.format(Date(cal.timeInMillis - 30L * 24 * 3600 * 1000)),
-                "end_date" to fmt.format(Date())
-            ))
-        } catch (_: Exception) {}
-        loading = false
+            val api = ApiService.create()
+            records = api.getRecords(mapOf("page" to "1", "page_size" to "200")).data
+        } catch (_: Exception) {} finally { loading = false }
     }
 
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("使用记录") }, colors = TopAppBarDefaults.topAppBarColors(containerColor = SidebarBg, titleContentColor = androidx.compose.ui.graphics.Color.White)) }
-    ) { padding ->
-        if (loading) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = androidx.compose.ui.Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(records) { record ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text("记录查询", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(12.dp))
+        if (loading) { Box(Modifier.fillMaxSize()) { CircularProgressIndicator(modifier = Modifier.align(androidx.compose.ui.Alignment.Center)) } }
+        else {
+            LazyColumn {
+                items(records) { r ->
+                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text("${record.consumable_name} x${record.quantity}${record.unit}", style = MaterialTheme.typography.titleSmall)
-                            Spacer(Modifier.height(4.dp))
-                            Text("${record.room_number} | ${record.usage_date}", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            if (record.note.isNotBlank()) {
-                                Text(record.note, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                            }
+                            Row { Text("${r.usage_date} | ${r.office_name}", style = MaterialTheme.typography.bodyLarge) }
+                            Row { Text("${r.consumable_name} x${r.quantity}", style = MaterialTheme.typography.bodyMedium) }
+                            if (r.note.isNotEmpty()) Text("备注: ${r.note}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                }
-                if (records.isEmpty()) {
-                    item { Text("暂无记录", modifier = Modifier.padding(16.dp), color = TextSecondary) }
                 }
             }
         }

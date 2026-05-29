@@ -1,237 +1,214 @@
-package handlers
+﻿package handlers
 
 import (
 	"database/sql"
-	"encoding/json"
+	"fmt"
 
 	"github.com/gofiber/fiber/v2"
-	"consumable-tracker/models"
+	"github.com/google/uuid"
+	"consumable-tracker/server/models"
 )
 
 type TicketHandler struct {
-	DB       *sql.DB
-	notifier *WebSocketHub
-}
-
-func NewTicketHandler(db *sql.DB, notifier *WebSocketHub) *TicketHandler {
-	return &TicketHandler{DB: db, notifier: notifier}
-}
-
-func (h *TicketHandler) Submit(c *fiber.Ctx) error {
-	var req models.TicketCreate
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
-	}
-
-	if req.ProblemType == "" {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "problem_type is required"})
-	}
-	if len(req.Description) > 500 {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "description too long (max 500)"})
-	}
-	if len(req.Contact) > 100 {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "contact too long (max 100)"})
-	}
-
-	var officeExists bool
-	h.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM offices WHERE id = $1)", req.OfficeID).Scan(&officeExists)
-	if !officeExists {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "office not found"})
-	}
-
-	var ticket models.Ticket
-	err := h.DB.QueryRow(`INSERT INTO tickets (office_id, problem_type, description, contact, device_type, device_model, status)
-		VALUES ($1, $2, $3, $4,
-			COALESCE((SELECT device_type FROM offices WHERE id = $1), ''),
-			COALESCE((SELECT device_model FROM offices WHERE id = $1), ''),
-			'pending')
-		RETURNING id, office_id, device_type, device_model, problem_type, COALESCE(description,''), COALESCE(contact,''),
-			status, created_at, updated_at,
-			(SELECT room_number FROM offices WHERE id = $1)`,
-		req.OfficeID, req.ProblemType, req.Description, req.Contact,
-	).Scan(&ticket.ID, &ticket.OfficeID, &ticket.DeviceType, &ticket.DeviceModel,
-		&ticket.ProblemType, &ticket.Description, &ticket.Contact,
-		&ticket.Status, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.RoomNumber)
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to create ticket"})
-	}
-
-	if h.notifier != nil {
-		data, _ := json.Marshal(fiber.Map{"type": "new_ticket", "ticket": ticket})
-		h.notifier.Broadcast("admin", string(data))
-	}
-
-	return c.Status(201).JSON(ticket)
-}
-
-func (h *TicketHandler) GetStatus(c *fiber.Ctx) error {
-	id := c.Params("id")
-	var ticket models.Ticket
-	err := h.DB.QueryRow(`SELECT id, problem_type, status, created_at, 
-		(SELECT room_number FROM offices WHERE id = tickets.office_id)
-		FROM tickets WHERE id = $1`, id,
-	).Scan(&ticket.ID, &ticket.ProblemType, &ticket.Status, &ticket.CreatedAt, &ticket.RoomNumber)
-	if err == sql.ErrNoRows {
-		return c.Status(404).JSON(models.ErrorResponse{Error: "ticket not found"})
-	}
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to query ticket"})
-	}
-	return c.JSON(ticket)
-}
-
-func (h *TicketHandler) OfficeProblemTypes(c *fiber.Ctx) error {
-	officeID := c.Params("office_id")
-	var deviceType string
-	h.DB.QueryRow("SELECT COALESCE(device_type, 'other') FROM offices WHERE id = $1", officeID).Scan(&deviceType)
-
-	rows, err := h.DB.Query("SELECT id, name, is_default FROM problem_types WHERE device_type = $1 ORDER BY sort_order, id", deviceType)
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to query problem types"})
-	}
-	defer rows.Close()
-
-	type ProblemTypeOption struct {
-		ID        int    `json:"id"`
-		Name      string `json:"name"`
-		IsDefault bool   `json:"is_default"`
-	}
-
-	var options []ProblemTypeOption
-	for rows.Next() {
-		var opt ProblemTypeOption
-		if rows.Scan(&opt.ID, &opt.Name, &opt.IsDefault) == nil {
-			options = append(options, opt)
-		}
-	}
-	return c.JSON(fiber.Map{"office_id": officeID, "device_type": deviceType, "problem_types": options})
+	DB        *sql.DB
+	Broadcast func(msg interface{})
 }
 
 func (h *TicketHandler) List(c *fiber.Ctx) error {
-	query := `SELECT id, office_id, device_type, device_model, problem_type, 
-		COALESCE(description,''), COALESCE(contact,''), status,
-		COALESCE(consumable_used,''), COALESCE(consumable_quantity,0),
-		handled_by_user_id, COALESCE(handle_note,''), created_at, updated_at,
-		(SELECT room_number FROM offices WHERE id = tickets.office_id)
-		FROM tickets WHERE 1=1`
-
-	var args []interface{}
-	argIdx := 1
-
-	if status := c.Query("status"); status != "" {
-		query += " AND status = $1"
+	status := c.Query("status")
+	officeID := c.Query("office_id")
+	query := `SELECT t.id, t.office_id, t.device_type, t.device_model, t.problem_type,
+		t.description, t.contact, t.status, t.consumable_used, t.consumable_quantity,
+		t.handled_by_user_id, t.handle_note, t.created_at, t.updated_at,
+		o.room_number, COALESCE(u.username,'')
+		FROM tickets t
+		JOIN offices o ON t.office_id = o.id
+		LEFT JOIN users u ON t.handled_by_user_id = u.id
+		WHERE 1=1`
+	args := []interface{}{}
+	if status != "" {
+		query += " AND t.status = ?"
 		args = append(args, status)
-		argIdx++
 	}
-	if officeID := c.Query("office"); officeID != "" {
-		query += " AND office_id = $" + string(rune('0'+argIdx))
+	if officeID != "" {
+		query += " AND t.office_id = ?"
 		args = append(args, officeID)
 	}
-
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY t.created_at DESC"
 
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to query tickets"})
+		return c.Status(500).JSON(fiber.Map{"error": "查询失败"})
 	}
 	defer rows.Close()
-
-	var tickets []models.Ticket
+	list := []models.Ticket{}
 	for rows.Next() {
 		var t models.Ticket
-		if err := rows.Scan(&t.ID, &t.OfficeID, &t.DeviceType, &t.DeviceModel,
-			&t.ProblemType, &t.Description, &t.Contact, &t.Status,
-			&t.ConsumableUsed, &t.ConsumableQuantity,
-			&t.HandledByUserID, &t.HandleNote, &t.CreatedAt, &t.UpdatedAt, &t.RoomNumber); err != nil {
-			return c.Status(500).JSON(models.ErrorResponse{Error: "failed to scan ticket"})
+		if err := rows.Scan(&t.ID, &t.OfficeID, &t.DeviceType, &t.DeviceModel, &t.ProblemType,
+			&t.Description, &t.Contact, &t.Status, &t.ConsumableUsed, &t.ConsumableQty,
+			&t.HandledByUserID, &t.HandleNote, &t.CreatedAt, &t.UpdatedAt,
+			&t.OfficeName, &t.HandledByUser); err != nil {
+			continue
 		}
-		tickets = append(tickets, t)
+		list = append(list, t)
 	}
-	return c.JSON(tickets)
+	return c.JSON(list)
 }
 
-func (h *TicketHandler) UpdateStatus(c *fiber.Ctx) error {
-	id := c.Params("id")
-	var req models.TicketStatusUpdate
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
-	}
-	if req.Status != "pending" && req.Status != "processing" && req.Status != "completed" {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid status"})
-	}
-
-	userID := c.Locals("user_id").(int)
-	_, err := h.DB.Exec("UPDATE tickets SET status = $1, handled_by_user_id = $2, updated_at = NOW() WHERE id = $3",
-		req.Status, userID, id)
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to update ticket status"})
-	}
-
-	if h.notifier != nil {
-		data, _ := json.Marshal(fiber.Map{"type": "ticket_updated", "ticket_id": id, "status": req.Status})
-		h.notifier.Broadcast("admin", string(data))
-	}
-
-	return c.JSON(fiber.Map{"message": "status updated"})
+type createTicketReq struct {
+	OfficeID    int    `json:"office_id"`
+	DeviceType  string `json:"device_type"`
+	DeviceModel string `json:"device_model"`
+	ProblemType string `json:"problem_type"`
+	Description string `json:"description"`
+	Contact     string `json:"contact"`
 }
 
-func (h *TicketHandler) Complete(c *fiber.Ctx) error {
-	id := c.Params("id")
-	var req models.TicketComplete
+func (h *TicketHandler) Create(c *fiber.Ctx) error {
+	var req createTicketReq
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
+		return c.Status(400).JSON(fiber.Map{"error": "请求格式错误"})
 	}
-
-	userID := c.Locals("user_id").(int)
-
-	tx, err := h.DB.Begin()
+	if qrOfficeID, ok := c.Locals("qr_office_id").(int); ok && qrOfficeID > 0 {
+		req.OfficeID = qrOfficeID
+	}
+	if req.DeviceType == "" {
+		if dt, ok := c.Locals("qr_device_type").(string); ok {
+			req.DeviceType = dt
+		}
+	}
+	if req.DeviceModel == "" {
+		if dm, ok := c.Locals("qr_device_model").(string); ok {
+			req.DeviceModel = dm
+		}
+	}
+	if req.OfficeID == 0 || req.ProblemType == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "参数不完整"})
+	}
+	id := uuid.New().String()
+	_, err := h.DB.Exec(`INSERT INTO tickets (id, office_id, device_type, device_model, problem_type, description, contact, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`, id, req.OfficeID, req.DeviceType, req.DeviceModel,
+		req.ProblemType, req.Description, req.Contact)
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to start transaction"})
+		return c.Status(500).JSON(fiber.Map{"error": "创建失败"})
 	}
-	defer tx.Rollback()
-
-	_, err = tx.Exec(`UPDATE tickets SET status = 'completed', consumable_used = $1, consumable_quantity = $2, 
-		handle_note = $3, handled_by_user_id = $4, updated_at = NOW() WHERE id = $5`,
-		req.ConsumableUsed, req.ConsumableQuantity, req.HandleNote, userID, id)
+	if h.Broadcast != nil {
+		h.Broadcast(fiber.Map{"type": "ticket_new", "id": id})
+	}
+	return c.Status(201).JSON(fiber.Map{"id": id})
+}
+	if req.OfficeID == 0 || req.ProblemType == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "参数不完�?})
+	}
+	id := uuid.New().String()
+	_, err := h.DB.Exec(`INSERT INTO tickets (id, office_id, device_type, device_model, problem_type, description, contact, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`, id, req.OfficeID, req.DeviceType, req.DeviceModel,
+		req.ProblemType, req.Description, req.Contact)
 	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to update ticket"})
+		return c.Status(500).JSON(fiber.Map{"error": "创建失败"})
 	}
+	if h.Broadcast != nil {
+		h.Broadcast(fiber.Map{"type": "ticket_new", "id": id})
+	}
+	return c.Status(201).JSON(fiber.Map{"id": id})
+}
 
-	if req.ConsumableUsed != "" && req.ConsumableQuantity > 0 {
+func (h *TicketHandler) CreatePublic(c *fiber.Ctx) error {
+	qr := c.Query("qr")
+	if qr != "" {
 		var officeID int
-		var consumableID int
-		tx.QueryRow("SELECT office_id FROM tickets WHERE id = $1", id).Scan(&officeID)
-		tx.QueryRow("SELECT id FROM consumable_models WHERE name ILIKE $1 LIMIT 1", "%"+req.ConsumableUsed+"%").Scan(&consumableID)
-		if consumableID == 0 {
-			err = tx.QueryRow("INSERT INTO consumable_models (name) VALUES ($1) RETURNING id", req.ConsumableUsed).Scan(&consumableID)
-			if err != nil {
-				return c.Status(500).JSON(models.ErrorResponse{Error: "failed to create consumable"})
-			}
-		}
-		_, err = tx.Exec("INSERT INTO usage_records (office_id, consumable_id, quantity, usage_date, note) VALUES ($1, $2, $3, CURRENT_DATE, $4)",
-			officeID, consumableID, req.ConsumableQuantity, "工单 #"+id[:8]+" 消耗")
-		if err != nil {
-			return c.Status(500).JSON(models.ErrorResponse{Error: "failed to create usage record"})
+		var deviceType, deviceModel string
+		err := h.DB.QueryRow("SELECT COALESCE(office_id,0), device_type, device_model FROM qr_codes WHERE code = ?", qr).
+			Scan(&officeID, &deviceType, &deviceModel)
+		if err == nil && officeID > 0 {
+			c.Locals("qr_office_id", officeID)
+			c.Locals("qr_device_type", deviceType)
+			c.Locals("qr_device_model", deviceModel)
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to commit"})
-	}
-
-	if h.notifier != nil {
-		data, _ := json.Marshal(fiber.Map{"type": "ticket_completed", "ticket_id": id})
-		h.notifier.Broadcast("admin", string(data))
-	}
-
-	return c.JSON(fiber.Map{"message": "ticket completed"})
+	return h.Create(c)
 }
 
-func (h *TicketHandler) Delete(c *fiber.Ctx) error {
+func (h *TicketHandler) GetByID(c *fiber.Ctx) error {
 	id := c.Params("id")
-	_, err := h.DB.Exec("DELETE FROM tickets WHERE id = $1", id)
-	if err != nil {
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to delete ticket"})
+	var t models.Ticket
+	err := h.DB.QueryRow(`SELECT t.id, t.office_id, t.device_type, t.device_model, t.problem_type,
+		t.description, t.contact, t.status, t.consumable_used, t.consumable_quantity,
+		t.handled_by_user_id, t.handle_note, t.created_at, t.updated_at,
+		o.room_number, COALESCE(u.username,'')
+		FROM tickets t
+		JOIN offices o ON t.office_id = o.id
+		LEFT JOIN users u ON t.handled_by_user_id = u.id
+		WHERE t.id = ?`, id).
+		Scan(&t.ID, &t.OfficeID, &t.DeviceType, &t.DeviceModel, &t.ProblemType,
+			&t.Description, &t.Contact, &t.Status, &t.ConsumableUsed, &t.ConsumableQty,
+			&t.HandledByUserID, &t.HandleNote, &t.CreatedAt, &t.UpdatedAt,
+			&t.OfficeName, &t.HandledByUser)
+	if err == sql.ErrNoRows {
+		return c.Status(404).JSON(fiber.Map{"error": "工单不存�?})
 	}
-	return c.JSON(fiber.Map{"message": "ticket deleted"})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "查询失败"})
+	}
+	return c.JSON(t)
+}
+
+func (h *TicketHandler) GetPublicByID(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var status, problemType, createdAt, room, desc, contact string
+	err := h.DB.QueryRow(`SELECT t.status, t.problem_type, t.created_at, o.room_number,
+		t.description, t.contact
+		FROM tickets t JOIN offices o ON t.office_id = o.id WHERE t.id = ?`, id).
+		Scan(&status, &problemType, &createdAt, &room, &desc, &contact)
+	if err == sql.ErrNoRows {
+		return c.Status(404).JSON(fiber.Map{"error": "工单不存�?})
+	}
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "查询失败"})
+	}
+	return c.JSON(fiber.Map{
+		"status":       status,
+		"problem_type": problemType,
+		"created_at":   createdAt,
+		"office_name":  room,
+		"description":  desc,
+		"contact":      contact,
+	})
+}
+
+type processTicketReq struct {
+	Status    string `json:"status"`
+	ConsumableUsed string `json:"consumable_used"`
+	ConsumableQty  int    `json:"consumable_quantity"`
+	HandleNote     string `json:"handle_note"`
+}
+
+func (h *TicketHandler) Process(c *fiber.Ctx) error {
+	id := c.Params("id")
+	userID := c.Locals("user_id").(int)
+	var req processTicketReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "请求格式错误"})
+	}
+	if req.Status != "processing" && req.Status != "completed" {
+		return c.Status(400).JSON(fiber.Map{"error": "无效状�?})
+	}
+	var currentStatus string
+	err := h.DB.QueryRow("SELECT status FROM tickets WHERE id = ?", id).Scan(&currentStatus)
+	if err == sql.ErrNoRows {
+		return c.Status(404).JSON(fiber.Map{"error": "工单不存�?})
+	}
+	if currentStatus == "completed" {
+		return c.Status(400).JSON(fiber.Map{"error": "工单已完成，无法修改"})
+	}
+	_, err = h.DB.Exec(`UPDATE tickets SET status=?, consumable_used=?, consumable_quantity=?,
+		handle_note=?, handled_by_user_id=?, updated_at=datetime('now') WHERE id=?`,
+		req.Status, req.ConsumableUsed, req.ConsumableQty, req.HandleNote, userID, id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "更新失败"})
+	}
+	if h.Broadcast != nil {
+		h.Broadcast(fiber.Map{"type": "ticket_update", "id": id, "status": req.Status})
+	}
+	return c.JSON(fiber.Map{"message": "更新成功"})
 }

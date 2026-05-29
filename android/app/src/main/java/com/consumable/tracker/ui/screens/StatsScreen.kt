@@ -5,35 +5,35 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.consumable.tracker.data.repository.TrackerRepository
-import com.consumable.tracker.ui.theme.*
+import com.consumable.tracker.data.api.*
+import com.patrykandpatrick.vico.compose.chart.Chart
+import com.patrykandpatrick.vico.compose.chart.line.lineChart
+import com.patrykandpatrick.vico.core.entry.entryModelOf
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StatsScreen() {
-    val repo = remember { TrackerRepository() }
-    var officeCount by remember { mutableIntStateOf(0) }
-    var consumableCount by remember { mutableIntStateOf(0) }
-    var pendingTickets by remember { mutableIntStateOf(0) }
+    var stats by remember { mutableStateOf<StatsResponse?>(null) }
 
     LaunchedEffect(Unit) {
-        try {
-            val stats = repo.getStats()
-            officeCount = stats.office_count
-            consumableCount = stats.consumable_count
-            pendingTickets = stats.pending_tickets
-        } catch (_: Exception) {}
+        try { stats = ApiService.create().getStats() } catch (_: Exception) {}
     }
 
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("数据统计") }, colors = TopAppBarDefaults.topAppBarColors(containerColor = SidebarBg, titleContentColor = androidx.compose.ui.graphics.Color.White)) }
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                Card(modifier = Modifier.weight(1f)) { Column(Modifier.padding(16.dp)) { Text("科室总数", style = MaterialTheme.typography.bodySmall, color = TextSecondary); Text("$officeCount", style = MaterialTheme.typography.headlineMedium, color = Primary) } }
-                Card(modifier = Modifier.weight(1f)) { Column(Modifier.padding(16.dp)) { Text("耗材种类", style = MaterialTheme.typography.bodySmall, color = TextSecondary); Text("$consumableCount", style = MaterialTheme.typography.headlineMedium, color = Success) } }
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text("统计报表", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(16.dp))
+
+        stats?.let { s ->
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Card(modifier = Modifier.weight(1f).padding(4.dp)) { Column(Modifier.padding(12.dp)) { Text("总用量"); Text("${s.total_usage}", style = MaterialTheme.typography.headlineSmall) } }
+                Card(modifier = Modifier.weight(1f).padding(4.dp)) { Column(Modifier.padding(12.dp)) { Text("本月"); Text("${s.current_month}", style = MaterialTheme.typography.headlineSmall) } }
             }
-            Card { Column(Modifier.padding(16.dp)) { Text("待处理工单", style = MaterialTheme.typography.bodySmall, color = TextSecondary); Text("$pendingTickets", style = MaterialTheme.typography.headlineMedium, color = Danger) } }
+            Spacer(Modifier.height(16.dp))
+            Text("月度趋势", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            if (s.monthly_trend.isNotEmpty()) {
+                val entries = s.monthly_trend.reversed().mapIndexed { i, item -> i to item.value.toFloat() }
+                Chart(chart = lineChart(), model = entryModelOf(*entries.toTypedArray()))
+            }
         }
     }
 }

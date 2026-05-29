@@ -1,144 +1,150 @@
-package handlers
+﻿package handlers
 
 import (
 	"database/sql"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"consumable-tracker/models"
+	"consumable-tracker/server/models"
+	"modernc.org/sqlite"
 )
 
 type BackupHandler struct {
-	DB       *sql.DB
-	BackupDir string
-}
-
-func NewBackupHandler(db *sql.DB, backupDir string) *BackupHandler {
-	return &BackupHandler{DB: db, BackupDir: backupDir}
-}
-
-func (h *BackupHandler) GetConfig(c *fiber.Ctx) error {
-	return c.JSON(models.BackupConfig{Frequency: "0 3 * * *", KeepDays: 180})
-}
-
-func (h *BackupHandler) SaveConfig(c *fiber.Ctx) error {
-	var cfg models.BackupConfig
-	if err := c.BodyParser(&cfg); err != nil {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid request body"})
-	}
-	if cfg.KeepDays < 1 || cfg.KeepDays > 365 {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "keep_days must be between 1 and 365"})
-	}
-	return c.JSON(fiber.Map{"message": "config saved", "keep_days": cfg.KeepDays})
+	DB      *sql.DB
+	DataDir string
 }
 
 func (h *BackupHandler) List(c *fiber.Ctx) error {
-	entries, err := os.ReadDir(h.BackupDir)
+	backupsDir := filepath.Join(h.DataDir, "../backups")
+	absDir, err := filepath.Abs(backupsDir)
 	if err != nil {
-		return c.JSON([]models.BackupFile{})
+		return c.Status(500).JSON(fiber.Map{"error": "服务器错�?})
 	}
 
-	var files []models.BackupFile
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql.gz") {
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c.JSON([]models.BackupInfo{})
+		}
+		return c.Status(500).JSON(fiber.Map{"error": "读取备份目录失败"})
+	}
+
+	list := []models.BackupInfo{}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".db" {
 			continue
 		}
-		info, err := entry.Info()
+		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		files = append(files, models.BackupFile{
-			Name: entry.Name(),
-			Size: info.Size(),
-			Date: info.ModTime().Format("2006-01-02 15:04:05"),
+		list = append(list, models.BackupInfo{
+			Filename:  e.Name(),
+			Size:      info.Size(),
+			CreatedAt: info.ModTime().Format("2006-01-02 15:04:05"),
 		})
 	}
+	return c.JSON(list)
+}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name > files[j].Name
+func (h *BackupHandler) Create(c *fiber.Ctx) error {
+	backupsDir := filepath.Join(h.DataDir, "../backups")
+	if err := os.MkdirAll(backupsDir, 0755); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "创建备份目录失败"})
+	}
+
+	filename := fmt.Sprintf("backup_%s.db", time.Now().Format("20060102_150405"))
+	dstPath := filepath.Join(backupsDir, filename)
+	db := h.DB
+
+	conn, err := db.Conn(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "获取数据库连接失�?})
+	}
+	defer conn.Close()
+
+	err = conn.Raw(func(driverConn interface{}) error {
+		sqliteConn, ok := driverConn.(*sqlite.Conn)
+		if !ok {
+			return fmt.Errorf("not a sqlite conn")
+		}
+		dstDB, err := sql.Open("sqlite", dstPath)
+		if err != nil {
+			return err
+		}
+		defer dstDB.Close()
+
+		dstConn, err := dstDB.Conn(c.Context())
+		if err != nil {
+			return err
+		}
+		defer dstConn.Close()
+
+		return dstConn.Raw(func(dstDriver interface{}) error {
+			dstSQLite, ok := dstDriver.(*sqlite.Conn)
+			if !ok {
+				return fmt.Errorf("dst not sqlite")
+			}
+			_, err := sqliteConn.Backup("main", dstSQLite, "main")
+			return err
+		})
 	})
 
-	return c.JSON(files)
-}
-
-func (h *BackupHandler) CreateNow(c *fiber.Ctx) error {
-	filename := filepath.Join(h.BackupDir, "backup_"+time.Now().Format("20060102_150405")+".sql.gz")
-	// In a real deployment, this would execute pg_dump via exec.Command
-	// For now, return success
-	return c.JSON(fiber.Map{"message": "backup created", "filename": filename})
-}
-
-func (h *BackupHandler) Download(c *fiber.Ctx) error {
-	filename := c.Params("filename")
-
-	if !strings.HasSuffix(filename, ".sql.gz") {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file type"})
+	if err != nil {
+		log.Printf("[Backup] failed: %v", err)
+		return c.Status(500).JSON(fiber.Map{"error": "备份失败"})
 	}
 
-	cleanPath := filepath.Clean(filepath.Join(h.BackupDir, filename))
-	baseDir := filepath.Clean(h.BackupDir)
-
-	if !strings.HasPrefix(cleanPath, baseDir) {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file path"})
-	}
-
-	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
-		return c.Status(404).JSON(models.ErrorResponse{Error: "backup file not found"})
-	}
-
-	return c.SendFile(cleanPath)
+	log.Printf("[Backup] created: %s", filename)
+	return c.JSON(fiber.Map{"message": "备份成功", "filename": filename})
 }
 
 func (h *BackupHandler) Restore(c *fiber.Ctx) error {
 	filename := c.Params("filename")
+	if filename == "" || filepath.Ext(filename) != ".db" {
+		return c.Status(400).JSON(fiber.Map{"error": "无效文件�?})
+	}
+	backupsDir := filepath.Join(h.DataDir, "../backups")
+	srcPath := filepath.Join(backupsDir, filename)
 
-	if !strings.HasSuffix(filename, ".sql.gz") {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file type"})
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		return c.Status(404).JSON(fiber.Map{"error": "备份文件不存�?})
 	}
 
-	cleanPath := filepath.Clean(filepath.Join(h.BackupDir, filename))
-	baseDir := filepath.Clean(h.BackupDir)
-
-	if !strings.HasPrefix(cleanPath, baseDir) {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file path"})
+	dbPath := filepath.Join(h.DataDir, "data.db")
+	srcData, err := os.ReadFile(srcPath)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "读取备份失败"})
+	}
+	if err := os.WriteFile(dbPath, srcData, 0644); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "恢复失败"})
 	}
 
-	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
-		return c.Status(404).JSON(models.ErrorResponse{Error: "backup file not found"})
-	}
-
-	return c.JSON(fiber.Map{"message": "restore initiated", "from": filename})
+	log.Printf("[Backup] restored from: %s (restart required)", filename)
+	return c.JSON(fiber.Map{"message": "恢复成功，请重启服务�?})
 }
 
 func (h *BackupHandler) Delete(c *fiber.Ctx) error {
 	filename := c.Params("filename")
-
-	if !strings.HasSuffix(filename, ".sql.gz") {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file type"})
+	if filename == "" || filepath.Ext(filename) != ".db" {
+		return c.Status(400).JSON(fiber.Map{"error": "无效文件�?})
 	}
-
-	cleanPath := filepath.Clean(filepath.Join(h.BackupDir, filename))
-	baseDir := filepath.Clean(h.BackupDir)
-
-	if !strings.HasPrefix(cleanPath, baseDir) {
-		return c.Status(400).JSON(models.ErrorResponse{Error: "invalid file path"})
+	backupsDir := filepath.Join(h.DataDir, "../backups")
+	path := filepath.Join(backupsDir, filename)
+	if err := os.Remove(path); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "删除失败"})
 	}
-
-	if err := os.Remove(cleanPath); err != nil {
-		if os.IsNotExist(err) {
-			return c.Status(404).JSON(models.ErrorResponse{Error: "backup file not found"})
-		}
-		return c.Status(500).JSON(models.ErrorResponse{Error: "failed to delete backup"})
-	}
-
-	return c.JSON(fiber.Map{"message": "backup deleted"})
+	return c.JSON(fiber.Map{"message": "删除成功"})
 }
 
-func StartBackupScheduler(db *sql.DB, backupDir string) {
+func (h *BackupHandler) StartAutoBackup() {
+	backupsDir := filepath.Join(h.DataDir, "../backups")
+	os.MkdirAll(backupsDir, 0755)
+
 	go func() {
 		for {
 			now := time.Now()
@@ -148,16 +154,57 @@ func StartBackupScheduler(db *sql.DB, backupDir string) {
 			}
 			time.Sleep(next.Sub(now))
 
-			filename := filepath.Join(backupDir, "backup_"+time.Now().Format("20060102")+".sql.gz")
-			_ = filename
+			filename := fmt.Sprintf("auto_%s.db", time.Now().Format("20060102"))
+			dstPath := filepath.Join(backupsDir, filename)
+			if _, err := os.Stat(dstPath); err == nil {
+				continue
+			}
 
-			entries, _ := os.ReadDir(backupDir)
-			for _, entry := range entries {
-				if strings.HasSuffix(entry.Name(), ".sql.gz") {
-					info, _ := entry.Info()
-					if info != nil && time.Since(info.ModTime()) > 180*24*time.Hour {
-						os.Remove(filepath.Join(backupDir, entry.Name()))
+			db := h.DB
+			conn, err := db.Conn(nil)
+			if err != nil {
+				log.Printf("[AutoBackup] conn error: %v", err)
+				continue
+			}
+
+			err = conn.Raw(func(driverConn interface{}) error {
+				sqliteConn, ok := driverConn.(*sqlite.Conn)
+				if !ok {
+					return fmt.Errorf("not a sqlite conn")
+				}
+				dstDB, err := sql.Open("sqlite", dstPath)
+				if err != nil {
+					return err
+				}
+				defer dstDB.Close()
+
+				dstConn, err := dstDB.Conn(nil)
+				if err != nil {
+					return err
+				}
+				defer dstConn.Close()
+
+				return dstConn.Raw(func(dstDriver interface{}) error {
+					dstSQLite, ok := dstDriver.(*sqlite.Conn)
+					if !ok {
+						return fmt.Errorf("dst not sqlite")
 					}
+					_, err := sqliteConn.Backup("main", dstSQLite, "main")
+					return err
+				})
+			})
+			conn.Close()
+
+			if err != nil {
+				log.Printf("[AutoBackup] failed: %v", err)
+				continue
+			}
+			log.Printf("[AutoBackup] created: %s", filename)
+
+			entries, _ := filepath.Glob(filepath.Join(backupsDir, "auto_*.db"))
+			if len(entries) > 180 {
+				for _, e := range entries[:len(entries)-180] {
+					os.Remove(e)
 				}
 			}
 		}

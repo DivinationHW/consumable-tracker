@@ -1,45 +1,54 @@
 <template>
-  <div style="min-height:100vh;background:#f5f7fa;display:flex;align-items:center;justify-content:center;padding:20px;">
-    <el-card style="width:460px;max-width:100%;">
-      <h2 style="text-align:center;margin-bottom:24px;">工单进度查询</h2>
-      <div v-if="ticket.id">
+  <div style="max-width:500px;margin:40px auto;padding:0 16px">
+    <el-card>
+      <template #header><h2 style="text-align:center">查询工单状态</h2></template>
+      <el-form @keyup.enter="search">
+        <el-form-item>
+          <el-input v-model="id" placeholder="请输入工单编号" size="large">
+            <template #append><el-button @click="search" :loading="loading">查询</el-button></template>
+          </el-input>
+        </el-form-item>
+      </el-form>
+      <div v-if="ticket">
         <el-descriptions :column="1" border>
-          <el-descriptions-item label="工单编号">{{ ticket.id }}</el-descriptions-item>
-          <el-descriptions-item label="房间号">{{ ticket.room_number }}</el-descriptions-item>
-          <el-descriptions-item label="问题类型">{{ ticket.problem_type }}</el-descriptions-item>
-          <el-descriptions-item label="提交时间">{{ ticket.created_at }}</el-descriptions-item>
-          <el-descriptions-item label="当前状态">
-            <el-tag :class="'tag-' + ticket.status" size="large">
-              {{ {pending:'待处理',processing:'处理中',completed:'已完成'}[ticket.status] }}
+          <el-descriptions-item label="状态">
+            <el-tag :type="ticket.status === 'completed' ? 'success' : ticket.status === 'processing' ? 'warning' : 'info'">
+              {{ ticket.status === 'pending' ? '待处理' : ticket.status === 'processing' ? '处理中' : '已完成' }}
             </el-tag>
           </el-descriptions-item>
+          <el-descriptions-item label="办公室">{{ ticket.office_name }}</el-descriptions-item>
+          <el-descriptions-item label="故障类型">{{ ticket.problem_type }}</el-descriptions-item>
+          <el-descriptions-item label="描述">{{ ticket.description }}</el-descriptions-item>
+          <el-descriptions-item label="提交时间">{{ ticket.created_at }}</el-descriptions-item>
         </el-descriptions>
       </div>
-      <el-input v-else v-model="searchId" placeholder="输入工单编号" style="margin-bottom:16px;" />
-      <el-button v-if="!ticket.id" type="primary" @click="searchTicket" style="width:100%">查询</el-button>
+      <div v-if="notFound" style="text-align:center;color:#999">未找到该工单</div>
     </el-card>
   </div>
 </template>
 
-<script setup>
-import { ref, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import axios from 'axios'
+<script setup lang="ts">
+import { ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { getPublicTicket } from '@/api/tickets'
 
 const route = useRoute()
-const router = useRouter()
-const ticket = ref({})
-const searchId = ref(route.params.id || '')
+const id = ref((route.query.id as string) || '')
+const ticket = ref<any>(null)
+const loading = ref(false)
+const notFound = ref(false)
 
-onMounted(() => {
-  if (searchId.value) searchTicket()
-})
-
-async function searchTicket() {
-  if (!searchId.value) return
+async function search() {
+  if (!id.value) return
+  loading.value = true
+  ticket.value = null
+  notFound.value = false
   try {
-    const res = await axios.get(`/ticket/${searchId.value}`)
-    ticket.value = res.data
-  } catch {}
+    ticket.value = (await getPublicTicket(id.value)).data
+  } catch {
+    notFound.value = true
+  } finally { loading.value = false }
 }
+
+if (route.query.id) search()
 </script>

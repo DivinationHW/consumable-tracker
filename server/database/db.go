@@ -1,60 +1,50 @@
-package database
+﻿package database
 
 import (
 	"database/sql"
+	"embed"
 	"fmt"
 	"log"
-	"time"
+	"os"
+	"path/filepath"
 
-	_ "github.com/lib/pq"
+	_ "modernc.org/sqlite"
 )
 
-var DB *sql.DB
+//go:embed schema.sql
+var schemaSQL string
 
-func Connect(databaseURL string) error {
-	var err error
-	DB, err = sql.Open("postgres", databaseURL)
+func NewDB(dataDir string) (*sql.DB, error) {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	dbPath := filepath.Join(dataDir, "data.db")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1")
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
-
-	DB.SetMaxOpenConns(20)
-	DB.SetMaxIdleConns(5)
-	DB.SetConnMaxLifetime(5 * time.Minute)
-
-	for i := 0; i < 30; i++ {
-		err = DB.Ping()
-		if err == nil {
-			log.Println("Database connected successfully")
-			return nil
-		}
-		log.Printf("Waiting for database... attempt %d/30: %v", i+1, err)
-		time.Sleep(2 * time.Second)
+	db.SetMaxOpenConns(1)
+	var integrity string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return nil, fmt.Errorf("integrity check: %w", err)
 	}
-	return fmt.Errorf("failed to connect to database after 30 attempts: %w", err)
+	if integrity != "ok" {
+		return nil, fmt.Errorf("database integrity check failed: %s", integrity)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	log.Println("[DB] SQLite initialized:", dbPath)
+	return db, nil
 }
 
-func Close() {
-	if DB != nil {
-		DB.Close()
-	}
-}
-
-func InitAdmin(username, passwordHash string) error {
-	var count int
-	err := DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+func migrate(db *sql.DB) error {
+	_, err := db.Exec(schemaSQL)
 	if err != nil {
-		return err
-	}
-	if count == 0 {
-		_, err = DB.Exec(
-			"INSERT INTO users (username, password_hash, role) VALUES ($1, $2, 'admin')",
-			username, passwordHash,
-		)
-		if err != nil {
-			return err
-		}
-		log.Printf("Admin user '%s' created", username)
+		return fmt.Errorf("exec schema: %w", err)
 	}
 	return nil
 }

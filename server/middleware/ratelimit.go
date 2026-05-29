@@ -1,113 +1,71 @@
-package middleware
+﻿package middleware
 
 import (
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"golang.org/x/time/rate"
 )
 
-type rateLimiter struct {
+type ipLimiter struct {
+	visitors map[string]*rate.Limiter
 	mu       sync.Mutex
-	attempts map[string][]time.Time
-	maxAttempts int
-	window     time.Duration
 }
 
-func newRateLimiter(maxAttempts int, window time.Duration) *rateLimiter {
-	rl := &rateLimiter{
-		attempts:    make(map[string][]time.Time),
-		maxAttempts: maxAttempts,
-		window:      window,
+func newIPLimiter(r rate.Limit, b int) *ipLimiter {
+	lm := &ipLimiter{
+		visitors: make(map[string]*rate.Limiter),
 	}
-	go rl.cleanup()
-	return rl
-}
-
-func (rl *rateLimiter) cleanup() {
-	for {
-		time.Sleep(5 * time.Minute)
-		rl.mu.Lock()
-		now := time.Now()
-		for key, times := range rl.attempts {
-			var valid []time.Time
-			for _, t := range times {
-				if now.Sub(t) < rl.window {
-					valid = append(valid, t)
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			lm.mu.Lock()
+			for k, v := range lm.visitors {
+				if v.Tokens() >= float64(b) {
+					delete(lm.visitors, k)
 				}
 			}
-			if len(valid) == 0 {
-				delete(rl.attempts, key)
-			} else {
-				rl.attempts[key] = valid
-			}
+			lm.mu.Unlock()
 		}
-		rl.mu.Unlock()
-	}
+	}()
+	return lm
 }
 
-func (rl *rateLimiter) allow(key string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	now := time.Now()
-	times := rl.attempts[key]
-
-	var valid []time.Time
-	for _, t := range times {
-		if now.Sub(t) < rl.window {
-			valid = append(valid, t)
-		}
+func (l *ipLimiter) get(key string) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	limiter, exists := l.visitors[key]
+	if !exists {
+		limiter = rate.NewLimiter(1, 5)
+		l.visitors[key] = limiter
 	}
-
-	if len(valid) >= rl.maxAttempts {
-		rl.attempts[key] = valid
-		return false
-	}
-
-	rl.attempts[key] = append(valid, now)
-	return true
+	return limiter
 }
 
-var loginLimiter = newRateLimiter(5, 5*time.Minute)
-var publicLimiter = newRateLimiter(10, 1*time.Hour)
-var qrcodeLimiter = newRateLimiter(10, 1*time.Minute)
+var loginLimiter = newIPLimiter(1, 5)
 
 func LoginRateLimit() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		username := c.FormValue("username")
+		ip := c.IP()
 		if username == "" {
-			username = c.Query("username")
+			username = c.Get("X-Forwarded-For", "unknown")
 		}
-		clientIP := c.IP()
-		key := username + ":" + clientIP
-
-		if !loginLimiter.allow(key) {
-			return c.Status(429).JSON(fiber.Map{
-				"error": "too many login attempts, try again in 5 minutes",
-			})
+		key := username + ":" + ip
+		if !loginLimiter.get(key).Allow() {
+			return c.Status(429).JSON(fiber.Map{"error": "登录尝试过多，请5分钟后再�?})
 		}
 		return c.Next()
 	}
 }
+
+var publicLimiter = newIPLimiter(rate.Limit(10.0/3600.0), 10)
 
 func PublicRateLimit() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if !publicLimiter.allow(c.IP()) {
-			return c.Status(429).JSON(fiber.Map{
-				"error": "too many requests, try again later",
-			})
-		}
-		return c.Next()
-	}
-}
-
-func QRCodeRateLimit() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if !qrcodeLimiter.allow(c.IP()) {
-			return c.Status(429).JSON(fiber.Map{
-				"error": "too many qrcode generation requests, try again later",
-			})
+		if !publicLimiter.get(c.IP()).Allow() {
+			return c.Status(429).JSON(fiber.Map{"error": "请求过于频繁"})
 		}
 		return c.Next()
 	}
